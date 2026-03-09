@@ -71,9 +71,9 @@ try:
 
     # Expert 동결/해제 검증
     moe_layer.freeze_experts([0])
-    assert not moe_layer.experts[0].w1.weight.requires_grad, "freeze_experts 실패"
+    assert not moe_layer.experts[0].w13.weight.requires_grad, "freeze_experts 실패"
     moe_layer.unfreeze_experts([0])
-    assert moe_layer.experts[0].w1.weight.requires_grad, "unfreeze_experts 실패"
+    assert moe_layer.experts[0].w13.weight.requires_grad, "unfreeze_experts 실패"
     print("   -> ✅ freeze/unfreeze 동작 확인")
 
     # aux_loss gradient 흐름 확인

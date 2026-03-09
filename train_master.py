@@ -11,9 +11,7 @@ import os
 from tqdm import tqdm
 from datasets import load_dataset
 
-from model import ModelConfig, MasterBlock, precompute_freqs_cis, RMSNorm
-# 하위 호환용 별칭
-JambaConfig = ModelConfig
+from model import ModelConfig, MasterBlock, precompute_freqs_cis, RMSNorm, convert_legacy_state_dict
 from utils import TextDataset, KoreanBPETokenizer, get_gpu_memory, print_memory_stats
 
 # ==========================================
@@ -281,8 +279,8 @@ def build_qlora_master_model(config, device='cpu'):
     compute_dtype = torch.bfloat16 if (device.type == 'cuda' and torch.cuda.is_bf16_supported()) else torch.float16
 
     for layer in model.layers:
-        for name in ['wq', 'wk', 'wv', 'wo', 'w1', 'w2', 'w3']:
-            parent = layer.attention if name in ('wq','wk','wv','wo') else layer.ffn
+        for name in ['wqkv', 'wo', 'w13', 'w2']:
+            parent = layer.attention if name in ('wqkv', 'wo') else layer.ffn
             old_linear = getattr(parent, name)
             new_linear = bnb.nn.Linear4bit(
                 old_linear.in_features, old_linear.out_features,
@@ -299,7 +297,7 @@ def build_qlora_master_model(config, device='cpu'):
 
     lora_config = LoraConfig(
         r=16, lora_alpha=32,
-        target_modules=["wq", "wk", "wv", "wo", "w1", "w2", "w3"],
+        target_modules=["wqkv", "wo", "w13", "w2"],
         lora_dropout=0.05, bias="none", task_type="FEATURE_EXTRACTION",
     )
     model = get_peft_model(model, lora_config)
@@ -416,6 +414,9 @@ def load_master_for_moe(checkpoint_path, device='cpu'):
     config = ckpt['config']
     state = ckpt['model_state_dict']
     first_key = next(iter(state.keys()))
+
+    # 레거시 체크포인트 변환 (w1/w3 → w13, wq/wk/wv → wqkv)
+    state = convert_legacy_state_dict(state)
 
     if 'base_model.model.' in first_key:
         # QLoRA 형식: 동일 구조로 복원 → merge_and_unload() 없이 직접 base+LoRA 합쳐 full-precision 추출

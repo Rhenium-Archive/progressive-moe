@@ -13,7 +13,7 @@ from tqdm import tqdm
 from datasets import load_dataset, interleave_datasets
 import random
 
-from model import ModelConfig, MoEBlock, precompute_freqs_cis, RMSNorm
+from model import ModelConfig, MoEBlock, precompute_freqs_cis, RMSNorm, convert_legacy_state_dict
 from train_master import MasterModel, load_master_for_moe
 from utils import TextDataset, KoreanBPETokenizer, get_gpu_memory, print_memory_stats
 
@@ -534,6 +534,7 @@ def main():
         # QLoRA 저장 시 LoRA/base_layer 키가 포함될 수 있으므로 필터링
         state = {k: v for k, v in ckpt['model_state_dict'].items()
                  if 'lora_' not in k and 'base_layer' not in k}
+        state = convert_legacy_state_dict(state)
         master_model.load_state_dict(state, strict=True)
         del ckpt, state; gc.collect()
     elif os.path.exists(epoch_path):
@@ -612,58 +613,22 @@ def main():
     
     # 데이터셋 Mixing: 7:3 비율로 섞기
     print("\n>>> 데이터셋 Mixing (70% 나무위키 + 30% 코드)...")
-    
-    # 비율 설정
-    namu_ratio = 0.7
-    code_ratio = 0.3
-    
-    # 목표 샘플 수 설정 (더 작은 데이터셋 기준으로 조정)
-    target_total = int(min(len(namu_texts) / namu_ratio, len(code_texts) / code_ratio))
-    target_total = min(target_total, 50000)  # 최대 50,000개로 제한
-    
+
+    namu_ratio, code_ratio = 0.7, 0.3
+
     # 비율에 맞게 샘플 수 계산
-    namu_samples = int(target_total * namu_ratio)
-    code_samples = int(target_total * code_ratio)
-    
-    # 실제 사용 가능한 샘플 수로 조정
-    namu_samples = min(namu_samples, len(namu_texts))
-    code_samples = min(code_samples, len(code_texts))
-    
-    # 랜덤 샘플링
+    target_total = min(
+        int(len(namu_texts) / namu_ratio),
+        int(len(code_texts) / code_ratio),
+        50000,
+    )
+    namu_samples = min(int(target_total * namu_ratio), len(namu_texts))
+    code_samples = min(int(target_total * code_ratio), len(code_texts))
+
+    # 랜덤 샘플링 + 셔플
     random.shuffle(namu_texts)
     random.shuffle(code_texts)
-    
-    namu_selected = namu_texts[:namu_samples]
-    code_selected = code_texts[:code_samples]
-    
-    # 7:3 비율로 인터리브 (교차 배치)
-    # 더 정확한 비율을 위해 전체를 섞은 후 비율에 맞게 구성
-    mixed_texts = []
-    
-    # 나무위키와 코드를 번갈아가며 추가 (7:3 비율 유지)
-    namu_idx = 0
-    code_idx = 0
-    
-    # 10개 단위로 7개 나무위키 + 3개 코드 패턴 반복
-    batch_size = 10
-    while namu_idx < len(namu_selected) or code_idx < len(code_selected):
-        # 7개 나무위키 추가
-        for _ in range(7):
-            if namu_idx < len(namu_selected):
-                mixed_texts.append(namu_selected[namu_idx])
-                namu_idx += 1
-        
-        # 3개 코드 추가
-        for _ in range(3):
-            if code_idx < len(code_selected):
-                mixed_texts.append(code_selected[code_idx])
-                code_idx += 1
-        
-        # 둘 다 끝나면 종료
-        if namu_idx >= len(namu_selected) and code_idx >= len(code_selected):
-            break
-    
-    # 랜덤 셔플 (최종 섞기) - 배치 내에서도 섞이도록
+    mixed_texts = namu_texts[:namu_samples] + code_texts[:code_samples]
     random.shuffle(mixed_texts)
     
     print(f"   -> 나무위키 샘플: {namu_samples}개 ({namu_ratio*100:.0f}%)")
@@ -706,6 +671,7 @@ def main():
     
     # Stage 1: Router만 학습 — 체크포인트가 있으면 건너뜀
     stage1_ckpt_path = os.path.join(save_dir, "moe_stage1_router.pt")
+    stage1_losses = None
     if os.path.exists(stage1_ckpt_path):
         print("\n" + "="*60)
         print("📌 Stage 1: Router 학습 — 체크포인트 발견, 건너뜀")
@@ -714,6 +680,7 @@ def main():
         stage1_ckpt = torch.load(stage1_ckpt_path, map_location='cpu', weights_only=False)
         moe_model.load_state_dict(stage1_ckpt['model_state_dict'], strict=False)
         moe_model = moe_model.to(device=device, dtype=compute_dtype)
+        stage1_losses = stage1_ckpt.get('losses', [])
         del stage1_ckpt; gc.collect(); torch.cuda.empty_cache()
         print("   -> ✅ Stage 1 체크포인트 로드 완료")
     else:
@@ -787,7 +754,10 @@ def main():
     print("="*60)
     
     print(f"\n>>> 학습 결과 요약:")
-    print(f"   Stage 1 (Router): {sum(stage1_losses) / len(stage1_losses):.4f}")
+    if stage1_losses:
+        print(f"   Stage 1 (Router): {sum(stage1_losses) / len(stage1_losses):.4f}")
+    else:
+        print(f"   Stage 1 (Router): (체크포인트에서 로드)")
     print(f"   Stage 2 (Expert): {sum(stage2_losses) / len(stage2_losses):.4f}")
     print(f"   Stage 3 (Full):  {sum(stage3_losses) / len(stage3_losses):.4f}")
     
@@ -796,7 +766,7 @@ def main():
     torch.save({
         'model_state_dict': moe_model.state_dict(),
         'config': moe_model.config,
-        'stage1_losses': stage1_losses,
+        'stage1_losses': stage1_losses or [],
         'stage2_losses': stage2_losses,
         'stage3_losses': stage3_losses,
         'final_loss': stage3_losses[-1] if stage3_losses else None,

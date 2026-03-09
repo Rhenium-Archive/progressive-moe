@@ -218,22 +218,18 @@ class ProgressiveMoELayer(nn.Module):
         # 출력 초기화
         flat_output = torch.zeros_like(flat_x)
 
-        # 벡터화 dispatch: O(E) 단일 루프
-        T = flat_x.shape[0]
-        tokens_for_dispatch = flat_x.unsqueeze(1).expand(-1, k, -1).reshape(T * k, dim)
-        expert_ids = flat_top_k_indices.reshape(T * k)
-        weights = flat_top_k_gates.reshape(T * k, 1)
-
+        # 벡터화 dispatch: 직접 인덱싱 (T×k×dim 확장 텐서 제거로 메모리 절약)
         for expert_idx in range(self.current_num_experts):
-            mask = (expert_ids == expert_idx)
+            mask = (flat_top_k_indices == expert_idx)
             if not mask.any():
                 continue
-            out = self.experts[expert_idx](tokens_for_dispatch[mask])
-            token_indices = torch.where(mask)[0] % T
+            token_ids, slot_ids = torch.where(mask)
+            expert_out = self.experts[expert_idx](flat_x[token_ids])
+            weights = flat_top_k_gates[token_ids, slot_ids].unsqueeze(1)
             flat_output.scatter_add_(
                 0,
-                token_indices.unsqueeze(1).expand(-1, dim),
-                out * weights[mask],
+                token_ids.unsqueeze(1).expand(-1, dim),
+                expert_out * weights,
             )
 
         output = flat_output.view(bsz, seq_len, dim)
