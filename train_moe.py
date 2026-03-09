@@ -305,7 +305,7 @@ def train_moe_model(
     optimizer, 
     criterion,
     device,
-    num_epochs: int = 1,
+    num_epochs: int = 3,
     save_dir: str = "moe_model_checkpoints",
     use_mixed_precision: bool = True,
     save_every_n_epochs: int = 1,
@@ -571,7 +571,10 @@ def main():
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    moe_model = moe_model.to(device)
+    # bf16으로 변환하여 모델 메모리 절반으로 절약 (FP32: ~17GB → bf16: ~8.5GB)
+    compute_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    moe_model = moe_model.to(device=device, dtype=compute_dtype)
+    print(f"   -> 모델 dtype: {compute_dtype} (메모리 절약)")
     # Gradient checkpointing으로 VRAM 절약
     for layer in moe_model.layers:
         if hasattr(layer, "use_gradient_checkpointing"):
@@ -682,8 +685,8 @@ def main():
     
     # 데이터로더
     dataset = TextDataset(mixed_texts, tokenizer, max_length=moe_model.config.max_seq_len)
-    batch_size = 2
-    gradient_accumulation_steps = 2
+    batch_size = 1
+    gradient_accumulation_steps = 4
     # 사전 토큰화 완료 → num_workers=0으로 충분 (fork 경고 방지)
     dataloader = DataLoader(
         dataset,
@@ -701,26 +704,37 @@ def main():
     save_dir = "moe_model_checkpoints"
     os.makedirs(save_dir, exist_ok=True)
     
-    # Stage 1: Router만 학습 (Expert는 Master FFN에서 복사한 상태로 고정)
-    print("\n" + "="*60)
-    print("📌 Stage 1: Router 학습")
-    print("="*60)
-    print("목적: Router가 토큰을 적절한 Expert로 라우팅하도록 학습")
-    print("설정: Attention + Expert 동결, Router만 학습")
-    
-    stage1_losses, stage1_checkpoint = train_moe_stage(
-        stage_name="Stage1_Router",
-        moe_model=moe_model,
-        dataloader=dataloader,
-        device=device,
-        num_epochs=1,
-        learning_rate=1e-4,  # Router 학습은 작은 학습률
-        train_router_only=True,
-        save_dir=save_dir,
-        gradient_accumulation_steps=gradient_accumulation_steps,
-    )
+    # Stage 1: Router만 학습 — 체크포인트가 있으면 건너뜀
+    stage1_ckpt_path = os.path.join(save_dir, "moe_stage1_router.pt")
+    if os.path.exists(stage1_ckpt_path):
+        print("\n" + "="*60)
+        print("📌 Stage 1: Router 학습 — 체크포인트 발견, 건너뜀")
+        print("="*60)
+        print(f"   -> 로드: {stage1_ckpt_path}")
+        stage1_ckpt = torch.load(stage1_ckpt_path, map_location='cpu', weights_only=False)
+        moe_model.load_state_dict(stage1_ckpt['model_state_dict'], strict=False)
+        moe_model = moe_model.to(device=device, dtype=compute_dtype)
+        del stage1_ckpt; gc.collect(); torch.cuda.empty_cache()
+        print("   -> ✅ Stage 1 체크포인트 로드 완료")
+    else:
+        print("\n" + "="*60)
+        print("📌 Stage 1: Router 학습")
+        print("="*60)
+        print("목적: Router가 토큰을 적절한 Expert로 라우팅하도록 학습")
+        print("설정: Attention + Expert 동결, Router만 학습")
 
-    print(f"\n✅ Stage 1 완료! 평균 Loss: {sum(stage1_losses) / len(stage1_losses):.4f}")
+        stage1_losses, stage1_checkpoint = train_moe_stage(
+            stage_name="Stage1_Router",
+            moe_model=moe_model,
+            dataloader=dataloader,
+            device=device,
+            num_epochs=1,
+            learning_rate=1e-4,
+            train_router_only=True,
+            save_dir=save_dir,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+        )
+        print(f"\n✅ Stage 1 완료! 평균 Loss: {sum(stage1_losses) / len(stage1_losses):.4f}")
 
     # Stage 2: Expert 학습 (Router 고정)
     print("\n" + "="*60)
