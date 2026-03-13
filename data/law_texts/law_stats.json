@@ -1,0 +1,48 @@
+{
+  "laws": [
+    {
+      "law_name": "산업안전보건법",
+      "short_name": "산안법",
+      "num_articles": 208,
+      "total_chars": 8580,
+      "enforcement_date": "20251001"
+    },
+    {
+      "law_name": "산업안전보건법 시행령",
+      "short_name": "산안법 시행령",
+      "num_articles": 135,
+      "total_chars": 9157,
+      "enforcement_date": "20251001"
+    },
+    {
+      "law_name": "산업안전보건법 시행규칙",
+      "short_name": "산안법 시행규칙",
+      "num_articles": 272,
+      "total_chars": 13569,
+      "enforcement_date": "20250601"
+    },
+    {
+      "law_name": "산업안전보건기준에 관한 규칙",
+      "short_name": "안전보건규칙",
+      "num_articles": 853,
+      "total_chars": 59009,
+      "enforcement_date": "20250901"
+    },
+    {
+      "law_name": "중대재해 처벌 등에 관한 법률",
+      "short_name": "중대재해처벌법",
+      "num_articles": 20,
+      "total_chars": 1307,
+      "enforcement_date": "20220127"
+    },
+    {
+      "law_name": "중대재해 처벌 등에 관한 법률 시행령",
+      "short_name": "중대재해처벌법 시행령",
+      "num_articles": 17,
+      "total_chars": 967,
+      "enforcement_date": "20251001"
+    }
+  ],
+  "total_articles": 1505,
+  "total_chars": 92589
+}
